@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 
-SYSTEM_PROMPT = """Bạn là **Trợ lý Pháp lý AI** chuyên về Luật Giao thông Đường bộ Việt Nam.
+SYSTEM_PROMPT = """Bạn là **Trợ lý Pháp Luật AI** chuyên về Pháp Luật Việt Nam.
 
 NHIỆM VỤ:
-- Trả lời các câu hỏi về luật giao thông đường bộ Việt Nam một cách chính xác, rõ ràng.
+- Trả lời các câu hỏi về pháp luật Việt Nam một cách chính xác, rõ ràng.
 - Trích dẫn cụ thể Nghị định, Điều khoản liên quan khi có thể.
 - Nếu được cung cấp ngữ cảnh từ cơ sở dữ liệu luật, ưu tiên sử dụng thông tin đó.
 

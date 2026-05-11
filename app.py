@@ -1,7 +1,7 @@
 """
-🚦 Trợ lý Pháp lý AI — Giao diện Streamlit
+🚦 Trợ lý Pháp luật AI — Giao diện Streamlit
 =========================================
-Giao diện chat kiểu ChatGPT/Gemini cho hệ thống tra cứu luật giao thông Việt Nam.
+Giao diện chat kiểu ChatGPT/Gemini cho hệ thống tra cứu pháp luật Việt Nam.
 
 Chạy:
     conda activate dl
@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 # ── Page Config (phải gọi trước mọi lệnh st khác) ───────────────────────────
 st.set_page_config(
-    page_title="Trợ lý Pháp lý AI 🚦",
+    page_title="Trợ lý Pháp luật AI 🚦",
     page_icon="🚦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -150,6 +150,7 @@ st.markdown(
 
 # ── Constants ────────────────────────────────────────────────────────────────
 DATA_CSV = ROOT / "data" / "processed" / "optimized_corpus.csv"
+CACHE_NPY = ROOT / "data" / "processed" / "embedding_cache.npy"
 EXAMPLE_QUESTIONS = [
     "Vượt đèn đỏ bị phạt bao nhiêu tiền?",
     "Lái xe khi say rượu bị xử lý thế nào?",
@@ -174,7 +175,7 @@ def load_rag():
         return None
     try:
         from src.rag.vector_db import HybridRAGSystem
-        return HybridRAGSystem(csv_path=str(DATA_CSV))
+        return HybridRAGSystem(csv_path=str(DATA_CSV), cache_file=str(CACHE_NPY))
     except Exception as e:
         st.warning(f"⚠️ Không thể load RAG: {e}")
         return None
@@ -262,8 +263,8 @@ def render_sidebar():
         st.markdown("""
         <div style="text-align: center; padding: 1rem 0 0.5rem;">
             <div style="font-size: 3rem;">⚖️</div>
-            <div style="font-weight: 700; font-size: 1.1rem; color: #9D97FF;">Trợ lý Pháp lý AI</div>
-            <div style="color: #5A5D7A; font-size: 0.78rem;">Luật Giao thông Việt Nam</div>
+            <div style="font-weight: 700; font-size: 1.1rem; color: #9D97FF;">Trợ lý Pháp luật AI</div>
+            <div style="color: #5A5D7A; font-size: 0.78rem;">Pháp luật Việt Nam</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -306,8 +307,8 @@ def render_sidebar():
 
 def render_chat():
     # Header
-    st.markdown('<p class="gradient-title">🚦 Trợ lý Pháp lý AI</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Hỏi đáp Luật Giao thông Đường bộ Việt Nam · Powered by Gemini AI + Hybrid RAG</p>', unsafe_allow_html=True)
+    st.markdown('<p class="gradient-title">🚦 Trợ lý Pháp luật AI</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Hỏi đáp Pháp luật Việt Nam · Powered by Gemini AI + Hybrid RAG</p>', unsafe_allow_html=True)
 
     # Welcome screen khi chưa có message
     if not st.session_state.messages:
@@ -315,7 +316,7 @@ def render_chat():
         <div class="welcome-card">
             <h3>👋 Xin chào! Tôi có thể giúp gì cho bạn?</h3>
             <p style="color: #6B7280; font-size: 0.9rem;">
-                Hãy đặt câu hỏi về luật giao thông đường bộ Việt Nam. 
+                Hãy đặt câu hỏi về pháp luật Việt Nam. 
                 Tôi sẽ tra cứu từ cơ sở dữ liệu pháp luật và trả lời chính xác.
             </p>
         </div>
@@ -347,7 +348,7 @@ def render_chat():
 
 def render_input():
     """Render text chat input."""
-    if prompt := st.chat_input("Hỏi về luật giao thông... (VD: Vượt đèn đỏ phạt bao nhiêu?)"):
+    if prompt := st.chat_input("Hỏi về pháp luật... (VD: Vượt đèn đỏ phạt bao nhiêu?)"):
         process_query(prompt)
         st.rerun()
 

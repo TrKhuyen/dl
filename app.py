@@ -156,6 +156,8 @@ EXAMPLE_QUESTIONS = [
     "Lái xe khi say rượu bị xử lý thế nào?",
     "Không đội mũ bảo hiểm phạt như thế nào?",
     "Xe máy không có gương chiếu hậu có bị phạt không?",
+    "Xây nhà thì cần điều kiện gì",
+    "Ly hôn đơn phương có được không? Điều kiện ra sao?"
 ]
 
 
@@ -167,6 +169,16 @@ def load_gemini():
     from src.ui.gemini_client import GeminiLegalAssistant
     return GeminiLegalAssistant()
 
+# THÊM MỚI: Hàm load model local Qwen2.5:7b qua thư viện ollama
+@st.cache_resource(show_spinner="🦙 Đang khởi tạo Qwen 2.5 Local...")
+def load_qwen():
+    """Load Qwen local client qua thư viện Ollama."""
+    try:
+        import ollama
+        return ollama
+    except ImportError:
+        st.warning("⚠️ Chưa cài đặt `ollama`. Vui lòng chạy: `pip install ollama` và đảm bảo Ollama đang chạy ngầm.")
+        return None
 
 @st.cache_resource(show_spinner="🔍 Đang nạp Cơ sở dữ liệu Luật (RAG)...")
 def load_rag():
@@ -186,6 +198,7 @@ def load_rag():
 def init_session():
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    
     if "gemini" not in st.session_state:
         try:
             st.session_state.gemini = load_gemini()
@@ -193,6 +206,11 @@ def init_session():
         except Exception as e:
             st.session_state.gemini = None
             st.session_state.gemini_error = str(e)
+            
+    # THÊM MỚI: Init Qwen local client vào session
+    if "qwen" not in st.session_state:
+        st.session_state.qwen = load_qwen()
+
     if "rag" not in st.session_state:
         st.session_state.rag = load_rag()
 
@@ -200,13 +218,8 @@ def init_session():
 # ── Helper: process query ─────────────────────────────────────────────────────
 
 def process_query(query: str):
-    """Gửi query → RAG → Gemini, lưu vào session state."""
+    """Gửi query → RAG → Mô hình AI (Gemini và Qwen), lưu vào session state."""
     if not query.strip():
-        return
-
-    gemini = st.session_state.get("gemini")
-    if gemini is None:
-        st.error(f"❌ Gemini chưa được khởi tạo. Lỗi: {st.session_state.get('gemini_error', 'Unknown')}")
         return
 
     # Thêm user message
@@ -224,33 +237,92 @@ def process_query(query: str):
         except Exception:
             contexts = []
 
-    # Stream câu trả lời từ Gemini
-    with st.chat_message("assistant", avatar="⚖️"):
-        placeholder = st.empty()
-        full_response = ""
-        try:
-            for chunk in gemini.answer_stream(query, contexts=contexts if contexts else None):
-                full_response += chunk
-                placeholder.markdown(full_response + "▌")
-            placeholder.markdown(full_response)
-        except Exception as e:
-            full_response = f"⚠️ Lỗi: {str(e)}"
-            placeholder.markdown(full_response)
+    # UI: Chia 2 cột để render câu trả lời song song
+    col_gemini, col_qwen = st.columns(2)
+    
+    full_response_gemini = ""
+    full_response_qwen = ""
 
-        # Hiển thị nguồn tham chiếu nếu có
-        if contexts:
-            with st.expander("📚 Nguồn tham chiếu từ CSDL Luật", expanded=False):
-                for i, ctx in enumerate(contexts, 1):
-                    st.markdown(
-                        f'<span class="source-badge">Nguồn {i}</span>', 
-                        unsafe_allow_html=True
+    # CỘT TRÁI: Gemini
+    with col_gemini:
+        st.caption("🤖 **Gemini AI**")
+        with st.chat_message("assistant", avatar="⚖️"):
+            gemini = st.session_state.get("gemini")
+            if gemini is None:
+                st.error("❌ Gemini chưa được khởi tạo.")
+            else:
+                placeholder_g = st.empty()
+                try:
+                    for chunk in gemini.answer_stream(query, contexts=contexts if contexts else None):
+                        full_response_gemini += chunk
+                        placeholder_g.markdown(full_response_gemini + "▌")
+                    placeholder_g.markdown(full_response_gemini)
+                except Exception as e:
+                    full_response_gemini = f"⚠️ Lỗi: {str(e)}"
+                    placeholder_g.markdown(full_response_gemini)
+
+    # CỘT PHẢI: Qwen
+    with col_qwen:
+        st.caption("🦙 **Qwen 2.5 (7B Local)**")
+        with st.chat_message("assistant", avatar="🦙"):
+            qwen_client = st.session_state.get("qwen")
+            if qwen_client is None:
+                st.error("❌ Không thể kết nối Qwen Local.")
+            else:
+                placeholder_q = st.empty()
+                try:
+                    system_prompt = """Bạn là **Trợ lý Pháp Luật AI** chuyên về Pháp Luật Việt Nam.
+
+                    NHIỆM VỤ:
+                    - Trả lời các câu hỏi về pháp luật Việt Nam một cách chính xác, rõ ràng.
+                    - Trích dẫn cụ thể Nghị định, Điều khoản liên quan khi có thể.
+                    - Nếu được cung cấp ngữ cảnh từ cơ sở dữ liệu luật, ưu tiên sử dụng thông tin đó.
+
+                    QUY TẮC:
+                    1. Trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu.
+                    2. Nếu không có đủ thông tin, hãy nói rõ và khuyến khích tham khảo luật sư.
+                    3. KHÔNG bịa đặt thông tin pháp lý không chắc chắn.
+                    4. Định dạng câu trả lời rõ ràng, dùng danh sách khi phù hợp.
+
+                    Bắt đầu mỗi câu trả lời bằng một câu tóm tắt ngắn, sau đó giải thích chi tiết."""
+                    
+                    if contexts:
+                        context_text = "\n---\n".join(contexts)
+                        prompt_with_rag = f"Thông tin tham chiếu:\n{context_text}\n\nCâu hỏi: {query}"
+                    else:
+                        prompt_with_rag = query
+
+                    stream = qwen_client.chat(
+                        model='qwen2.5:7b',
+                        messages=[
+                            {'role': 'system', 'content': system_prompt},
+                            {'role': 'user', 'content': prompt_with_rag}
+                        ],
+                        stream=True,
                     )
-                    st.caption(ctx[:300] + "..." if len(ctx) > 300 else ctx)
+                    for chunk in stream:
+                        full_response_qwen += chunk['message']['content']
+                        placeholder_q.markdown(full_response_qwen + "▌")
+                    placeholder_q.markdown(full_response_qwen)
+                except Exception as e:
+                    full_response_qwen = f"⚠️ Lỗi xử lý: {str(e)}"
+                    placeholder_q.markdown(full_response_qwen)
 
-    # Lưu assistant message
+    # Hiển thị nguồn tham chiếu dùng chung
+    if contexts:
+        with st.expander("📚 Nguồn tham chiếu từ CSDL Luật", expanded=False):
+            for i, ctx in enumerate(contexts, 1):
+                st.markdown(
+                    f'<span class="source-badge">Nguồn {i}</span>', 
+                    unsafe_allow_html=True
+                )
+                st.caption(ctx[:300] + "..." if len(ctx) > 300 else ctx)
+
+    # Lưu lịch sử chung dạng dual_assistant
     st.session_state.messages.append({
-        "role": "assistant",
-        "content": full_response,
+        "role": "dual_assistant",
+        "content_gemini": full_response_gemini,
+        "content_qwen": full_response_qwen,
         "sources": contexts,
     })
 
@@ -300,7 +372,7 @@ def render_sidebar():
         st.divider()
 
         st.caption("🏫 PTIT · NLP · Deep Learning Project")
-        st.caption("Powered by Gemini 2.5 Flash + Hybrid RAG")
+        st.caption("Powered by Gemini 2.5 Flash & Qwen 2.5 + Hybrid RAG")
 
 
 # ── Main Chat Area ────────────────────────────────────────────────────────────
@@ -308,7 +380,7 @@ def render_sidebar():
 def render_chat():
     # Header
     st.markdown('<p class="gradient-title">🚦 Trợ lý Pháp luật AI</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Hỏi đáp Pháp luật Việt Nam · Powered by Gemini AI + Hybrid RAG</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Hỏi đáp Pháp luật Việt Nam · Chế độ so sánh 2 Model</p>', unsafe_allow_html=True)
 
     # Welcome screen khi chưa có message
     if not st.session_state.messages:
@@ -317,7 +389,7 @@ def render_chat():
             <h3>👋 Xin chào! Tôi có thể giúp gì cho bạn?</h3>
             <p style="color: #6B7280; font-size: 0.9rem;">
                 Hãy đặt câu hỏi về pháp luật Việt Nam. 
-                Tôi sẽ tra cứu từ cơ sở dữ liệu pháp luật và trả lời chính xác.
+                Hệ thống sẽ tra cứu cơ sở dữ liệu và hiển thị câu trả lời từ cả hai mô hình (Gemini và Qwen) để bạn so sánh.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -333,14 +405,29 @@ def render_chat():
     # Render chat history
     for msg in st.session_state.messages:
         role = msg["role"]
-        content = msg["content"]
-        avatar = "🧑‍💻" if role == "user" else "⚖️"
+        
+        # User message
+        if role == "user":
+            with st.chat_message("user", avatar="🧑‍💻"):
+                st.markdown(msg["content"])
+                
+        # Dual assistant messages
+        elif role == "dual_assistant":
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.caption("🤖 **Gemini AI**")
+                with st.chat_message("assistant", avatar="⚖️"):
+                    st.markdown(msg.get("content_gemini", ""))
+                    
+            with col2:
+                st.caption("🦙 **Qwen 2.5 (7B Local)**")
+                with st.chat_message("assistant", avatar="🦙"):
+                    st.markdown(msg.get("content_qwen", ""))
 
-        with st.chat_message(role, avatar=avatar):
-            st.markdown(content)
-            # Nguồn tham chiếu cho assistant message
-            if role == "assistant" and msg.get("sources"):
-                with st.expander("📚 Nguồn tham chiếu", expanded=False):
+            # Nguồn tham chiếu chung
+            if msg.get("sources"):
+                with st.expander("📚 Nguồn tham chiếu chung", expanded=False):
                     for i, ctx in enumerate(msg["sources"], 1):
                         st.markdown(f'<span class="source-badge">Nguồn {i}</span>', unsafe_allow_html=True)
                         st.caption(ctx[:300] + "..." if len(ctx) > 300 else ctx)

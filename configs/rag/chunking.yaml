@@ -1,0 +1,27 @@
+paths:
+  input: data/processed/legal_documents_clean_2024_2026.csv
+  output: data/processed/legal_chunks_2024_2026.csv
+
+columns:
+  text: content_clean
+  metadata:
+    - id
+    - document_number
+    - title
+    - url
+    - legal_type
+    - legal_sectors
+    - issuing_authority
+    - issuance_date
+    - signers
+
+chunking:
+  max_chars: 4500
+  overlap_chars: 500
+
+patterns:
+  article: '(?m)^\s*(Điều\s+(\d+[A-Za-z]?)\.\s*[^\n]*)'
+  article_title: '^Điều\s+(\d+[A-Za-z]?)\.\s*(.*)$'
+  whitespace: '[ \t\r\f\v]+'
+  multi_newline: '\n{3,}'
+  search_clean: '[^\w\s/\.\-:;,%()\[\]đĐ]'

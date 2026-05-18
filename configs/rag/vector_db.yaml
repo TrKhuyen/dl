@@ -1,0 +1,90 @@
+paths:
+  csv: data/processed/legal_chunks_2024_2026.csv
+  cache_dir: data/processed/rag_cache_2024_2026
+
+models:
+  encoder: keepitreal/vietnamese-sbert
+  reranker: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+  llm: qwen2.5:7b
+
+index:
+  type: hnsw
+  batch_size: 32
+  hnsw_m: 32
+  hnsw_ef_construction: 100
+  hnsw_ef_search: 128
+  ivf_nlist:
+  ivf_nprobe: 32
+
+retrieval:
+  vector_top_k: 50
+  bm25_top_k: 50
+  rerank_top_n: 50
+  final_top_k: 5
+  min_context_chars: 30
+  weak_score_threshold: -2.0
+
+cache:
+  rebuild: false
+  bm25_tokenizer_version: vi_legal_keep_accents_v1
+
+schema:
+  chunking_columns:
+    - id
+    - document_number
+    - title
+    - url
+    - legal_type
+    - legal_sectors
+    - issuing_authority
+    - issuance_date
+    - signers
+    - doc_id
+    - chunk_index
+    - chunk_id
+    - chunk_type
+    - article_number
+    - article_title
+    - chunk_char_len
+    - chunk_text
+    - context_search
+  legacy_columns:
+    - law_id
+    - article_id
+    - clause_id
+    - point_id
+    - unit_id
+    - char_len
+    - context
+
+legal_synonyms:
+  vượt đèn đỏ: không chấp hành hiệu lệnh của đèn tín hiệu giao thông
+  say rượu: có nồng độ cồn trong máu hoặc hơi thở
+  say xỉn: có nồng độ cồn trong máu hoặc hơi thở
+  uống rượu lái xe: người điều khiển xe có nồng độ cồn
+  lái xe khi say rượu: người điều khiển xe có nồng độ cồn
+  bằng lái: giấy phép lái xe
+  cà vẹt: giấy đăng ký xe
+  đăng ký xe: giấy đăng ký xe
+  xây dựng trái phép: xây dựng công trình không phép
+  xây nhà trái phép: xây dựng công trình không phép
+
+llm:
+  system_prompt: |
+    Bạn là Trợ lý Pháp Luật AI chuyên về pháp luật Việt Nam.
+
+    Nhiệm vụ của bạn:
+    - Trả lời chính xác, rõ ràng, bằng tiếng Việt.
+    - Chỉ sử dụng thông tin có trong CONTEXT được cung cấp.
+    - Đọc và đối chiếu toàn bộ CONTEXT trước khi kết luận, không chỉ dựa vào context đầu tiên.
+    - Tổng hợp các context thành một câu trả lời duy nhất, mạch lạc.
+    - Không bịa mức phạt, điều luật, ngày hiệu lực, phạm vi áp dụng hoặc căn cứ ngoài CONTEXT.
+    - Nếu CONTEXT không đủ căn cứ, phải nói rõ: "Tôi không tìm thấy căn cứ pháp lý đầy đủ trong dữ liệu được cung cấp."
+    - Nếu CONTEXT chỉ bao phủ một trường hợp hẹp, hãy nói rõ phạm vi hẹp đó và không kết luận chung cho toàn bộ câu hỏi.
+    - Khi nêu căn cứ, phải trích dẫn số hiệu văn bản/document_number và điều/article_number nếu CONTEXT có cung cấp.
+
+    Format trả lời bắt buộc:
+    - Kết luận ngắn:
+    - Căn cứ pháp lý:
+    - Giải thích:
+    - Lưu ý nếu có:

@@ -7,6 +7,9 @@ openai-whisper
 torch
 datasets
 pandas
+matplotlib
+seaborn
+PyYAML>=6.0.2
 numpy
 faiss-cpu
 rank-bm25

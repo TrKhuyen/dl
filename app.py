@@ -1,42 +1,56 @@
 """
-🚦 Trợ lý Pháp luật AI — Giao diện Streamlit
-=========================================
-Giao diện chat kiểu ChatGPT/Gemini cho hệ thống tra cứu pháp luật Việt Nam.
+Trợ lý Pháp luật AI - giao diện Streamlit so sánh 3 chế độ trả lời.
 
 Chạy:
     conda activate dl
     streamlit run app.py
 """
 
+from __future__ import annotations
+
+import gc
 import sys
 from pathlib import Path
+from time import perf_counter
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-# ── Path setup ──────────────────────────────────────────────────────────────
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-# ── Page Config (phải gọi trước mọi lệnh st khác) ───────────────────────────
+RAG_CONFIG = ROOT / "configs" / "rag" / "vector_db.yaml"
+DEFAULT_DATA_CSV = ROOT / "data" / "processed" / "legal_chunks_2024_2026.csv"
+DATA_CSV = DEFAULT_DATA_CSV
+DEFAULT_ENCODER = "keepitreal/vietnamese-sbert"
+DEFAULT_HALONG_ENCODER = "hiieu/halong_embedding"
+RAG_TOP_K = 3
+RAG_LOAD_ERRORS_KEY = "rag_load_errors"
+REQUIRED_CACHE_FILES = (
+    "embedding_cache.npy",
+    "embedding_cache_meta.json",
+    "bm25.pkl",
+    "bm25.pkl.meta.json",
+)
+
+
 st.set_page_config(
-    page_title="Trợ lý Pháp luật AI 🚦",
-    page_icon="🚦",
+    page_title="Trợ lý Pháp luật AI",
+    page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ───────────────────────────────────────────────────────────────
 st.markdown(
     """
     <style>
-    /* Import Google Font */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
 
-    /* Gradient header */
     .gradient-title {
         background: linear-gradient(135deg, #6C63FF 0%, #48CAE4 50%, #06D6A0 100%);
         -webkit-background-clip: text;
@@ -44,36 +58,26 @@ st.markdown(
         background-clip: text;
         font-size: 2.2rem;
         font-weight: 700;
-        letter-spacing: -0.5px;
         margin-bottom: 0;
     }
 
     .subtitle {
         color: #8B8FA8;
-        font-size: 0.9rem;
+        font-size: 0.92rem;
         margin-top: 4px;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1.25rem;
     }
 
-    /* Chat messages styling */
     [data-testid="stChatMessage"] {
-        border-radius: 16px;
-        margin-bottom: 0.5rem;
+        border-radius: 12px;
+        margin-bottom: 0.65rem;
         padding: 0.5rem 1rem;
     }
 
-    /* User message */
-    [data-testid="stChatMessage"][data-testid*="user"] {
-        background: linear-gradient(135deg, #2D2B55 0%, #1A1C2E 100%);
-    }
-
-    /* Assistant message */
     [data-testid="stChatMessage"][data-testid*="assistant"] {
-        background: linear-gradient(135deg, #0D2137 0%, #0E1117 100%);
         border-left: 3px solid #6C63FF;
     }
 
-    /* Source badge */
     .source-badge {
         display: inline-block;
         background: rgba(108, 99, 255, 0.15);
@@ -86,51 +90,53 @@ st.markdown(
         font-weight: 500;
     }
 
-    /* Status badge */
-    .status-rag-on {
-        background: rgba(6, 214, 160, 0.15);
+    .model-card {
+        border: 1px solid rgba(108, 99, 255, 0.22);
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin-bottom: 0.65rem;
+        background: rgba(108, 99, 255, 0.06);
+    }
+
+    .model-name {
+        font-weight: 700;
+        color: #E8E7FF;
+        font-size: 0.92rem;
+    }
+
+    .model-meta {
+        color: #A7ABC4;
+        font-size: 0.78rem;
+        margin-top: 0.2rem;
+    }
+
+    .status-ok {
         color: #06D6A0;
-        border: 1px solid rgba(6, 214, 160, 0.3);
-        border-radius: 20px;
-        padding: 4px 12px;
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         font-weight: 600;
     }
 
-    .status-rag-off {
-        background: rgba(255, 214, 10, 0.15);
+    .status-warn {
         color: #FFD60A;
-        border: 1px solid rgba(255, 214, 10, 0.3);
-        border-radius: 20px;
-        padding: 4px 12px;
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         font-weight: 600;
     }
 
-    /* Sidebar style */
     [data-testid="stSidebar"] {
         background: linear-gradient(180deg, #1A1C2E 0%, #0E1117 100%);
         border-right: 1px solid rgba(108, 99, 255, 0.2);
     }
 
-    /* Divider */
     hr {
         border-color: rgba(108, 99, 255, 0.2) !important;
     }
 
-    /* Spinner */
-    .stSpinner > div {
-        border-top-color: #6C63FF !important;
-    }
-
-
-    /* Welcome card */
     .welcome-card {
         background: linear-gradient(135deg, rgba(108, 99, 255, 0.08) 0%, rgba(72, 202, 228, 0.08) 100%);
         border: 1px solid rgba(108, 99, 255, 0.2);
-        border-radius: 16px;
-        padding: 1.5rem 2rem;
-        margin: 1rem 0 2rem;
+        border-radius: 8px;
+        padding: 1.25rem 1.5rem;
+        margin: 1rem 0 1.5rem;
     }
 
     .welcome-card h3 {
@@ -139,8 +145,6 @@ st.markdown(
         margin-bottom: 0.8rem;
     }
 
-
-    /* Hide streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     </style>
@@ -148,313 +152,620 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Constants ────────────────────────────────────────────────────────────────
-DATA_CSV = ROOT / "data" / "processed" / "optimized_corpus.csv"
-CACHE_NPY = ROOT / "data" / "processed" / "embedding_cache.npy"
+
 EXAMPLE_QUESTIONS = [
     "Vượt đèn đỏ bị phạt bao nhiêu tiền?",
     "Lái xe khi say rượu bị xử lý thế nào?",
     "Không đội mũ bảo hiểm phạt như thế nào?",
     "Xe máy không có gương chiếu hậu có bị phạt không?",
-    "Xây nhà thì cần điều kiện gì",
-    "Ly hôn đơn phương có được không? Điều kiện ra sao?"
+    "Xây nhà thì cần điều kiện gì?",
+    "Ly hôn đơn phương có được không? Điều kiện ra sao?",
 ]
 
 
-# ── Cached resource loaders ───────────────────────────────────────────────────
+def project_path(path_value: str) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else ROOT / path
 
-@st.cache_resource(show_spinner="🤖 Đang khởi tạo Gemini AI...")
-def load_gemini():
-    """Load Gemini client (cached, chỉ init 1 lần)."""
-    from src.ui.gemini_client import GeminiLegalAssistant
-    return GeminiLegalAssistant()
 
-# THÊM MỚI: Hàm load model local Qwen2.5:7b qua thư viện ollama
-@st.cache_resource(show_spinner="🦙 Đang khởi tạo Qwen 2.5 Local...")
-def load_qwen():
-    """Load Qwen local client qua thư viện Ollama."""
+def session_get(key: str, default: Any = None) -> Any:
+    return st.session_state.get(key, default)
+
+
+def session_set(key: str, value: Any) -> None:
+    st.session_state[key] = value
+
+
+def get_rag_load_error(cache_dir_key: str) -> Optional[str]:
+    errors = session_get(RAG_LOAD_ERRORS_KEY, {})
+    if not isinstance(errors, dict):
+        return None
+    error = errors.get(cache_dir_key)
+    return str(error) if error else None
+
+
+def set_rag_load_error(cache_dir_key: str, error: Optional[str]) -> None:
+    errors = session_get(RAG_LOAD_ERRORS_KEY, {})
+    errors = dict(errors) if isinstance(errors, dict) else {}
+    if error:
+        errors[cache_dir_key] = error
+    else:
+        errors.pop(cache_dir_key, None)
+    session_set(RAG_LOAD_ERRORS_KEY, errors)
+
+
+def ensure_messages() -> List[Dict[str, Any]]:
+    if "messages" not in st.session_state:
+        st.session_state["messages"] = []
+    return st.session_state["messages"]
+
+
+@st.cache_data(show_spinner=False)
+def load_rag_settings() -> Dict[str, Any]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError("Chưa cài PyYAML. Hãy chạy: pip install PyYAML") from exc
+
+    with open(RAG_CONFIG, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config YAML phải là object: {RAG_CONFIG}")
+    return data
+
+
+def resolve_csv_path(settings: Dict[str, Any]) -> Path:
+    if DATA_CSV != DEFAULT_DATA_CSV:
+        return DATA_CSV
+
+    configured = settings.get("paths", {}).get("csv")
+    return project_path(configured) if configured else DATA_CSV
+
+
+@st.cache_resource(show_spinner="Đang đọc cấu hình LLM...")
+def load_llm_state() -> Dict[str, Any]:
+    from src.rag.llm import DIRECT_SYSTEM_PROMPT
+
+    settings = load_rag_settings()
+    model = settings.get("models", {}).get("llm", "qwen2.5:7b")
+    rag_prompt = settings.get("llm", {}).get("system_prompt", "")
+    return {
+        "config": {"llm_model": model},
+        "llm_system_prompt": rag_prompt,
+        "direct_system_prompt": DIRECT_SYSTEM_PROMPT,
+    }
+
+
+@st.cache_resource(show_spinner="Đang kiểm tra Ollama...")
+def load_ollama_client() -> Optional[Any]:
     try:
         import ollama
+
         return ollama
     except ImportError:
-        st.warning("⚠️ Chưa cài đặt `ollama`. Vui lòng chạy: `pip install ollama` và đảm bảo Ollama đang chạy ngầm.")
+        st.warning("Chưa cài `ollama`. Hãy chạy `pip install ollama` và pull model trong YAML.")
         return None
 
-@st.cache_resource(show_spinner="🔍 Đang nạp Cơ sở dữ liệu Luật (RAG)...")
-def load_rag():
-    """Load RAG system nếu data tồn tại (cached)."""
-    if not DATA_CSV.exists():
-        return None
+
+def build_rag_resource(
+    config_path: str,
+    csv_path: str,
+    cache_dir: Optional[str],
+    cache_dir_key: str,
+    encoder_key: str,
+    encoder_name: Optional[str],
+) -> Any:
+    from src.rag.vector_db import HybridRAGSystem
+
+    return HybridRAGSystem(
+        config_path=config_path,
+        csv_path=csv_path,
+        cache_dir=cache_dir,
+        cache_dir_key=cache_dir_key,
+        encoder_key=encoder_key,
+        encoder_name=encoder_name,
+    )
+
+
+def load_rag(
+    cache_dir_key: str = "cache_dir",
+    encoder_key: str = "encoder",
+    encoder_name: Optional[str] = None,
+) -> Optional[Any]:
     try:
-        from src.rag.vector_db import HybridRAGSystem
-        return HybridRAGSystem(csv_path=str(DATA_CSV), cache_file=str(CACHE_NPY))
-    except Exception as e:
-        st.warning(f"⚠️ Không thể load RAG: {e}")
+        settings = load_rag_settings()
+        csv_path = resolve_csv_path(settings)
+        if not csv_path.exists():
+            set_rag_load_error(cache_dir_key, f"Không tìm thấy CSV dữ liệu: {csv_path}")
+            return None
+        cache_dir_value = settings.get("paths", {}).get(cache_dir_key)
+        cache_dir = str(project_path(cache_dir_value)) if cache_dir_value else None
+
+        rag = build_rag_resource(
+            config_path=str(RAG_CONFIG),
+            csv_path=str(csv_path),
+            cache_dir=cache_dir,
+            cache_dir_key=cache_dir_key,
+            encoder_key=encoder_key,
+            encoder_name=encoder_name,
+        )
+        set_rag_load_error(cache_dir_key, None)
+        return rag
+    except Exception as exc:
+        error = str(exc)
+        set_rag_load_error(cache_dir_key, error)
+        st.warning(f"Không thể load RAG `{cache_dir_key}`: {error}")
         return None
 
 
-# ── Session State Init ────────────────────────────────────────────────────────
+def cache_dir_path(cache_dir_key: str) -> Optional[Path]:
+    try:
+        settings = load_rag_settings()
+    except Exception:
+        return None
+    cache_dir_value = settings.get("paths", {}).get(cache_dir_key)
+    return project_path(cache_dir_value) if cache_dir_value else None
 
-def init_session():
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
-    if "gemini" not in st.session_state:
+
+def cache_artifacts_ready(cache_dir_key: str) -> bool:
+    try:
+        settings = load_rag_settings()
+    except Exception:
+        return False
+
+    cache_dir = cache_dir_path(cache_dir_key)
+    if cache_dir is None or not cache_dir.exists():
+        return False
+
+    index_type = str(settings.get("index", {}).get("type", "hnsw")).lower()
+    required_files = (
+        *REQUIRED_CACHE_FILES,
+        f"faiss_{index_type}.index",
+        f"faiss_{index_type}.index.meta.json",
+    )
+    return all((cache_dir / filename).exists() for filename in required_files)
+
+
+def get_encoder_name(encoder_key: str = "encoder", default: str = DEFAULT_ENCODER) -> str:
+    try:
+        settings = load_rag_settings()
+    except Exception:
+        return default
+    return settings.get("models", {}).get(encoder_key, default)
+
+
+def get_halong_encoder_name() -> str:
+    return get_encoder_name("encoder_halong", DEFAULT_HALONG_ENCODER)
+
+
+def format_elapsed(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "N/A"
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} ms"
+    return f"{seconds:.2f} s"
+
+
+def render_timing(
+    *,
+    llm_elapsed: Optional[float] = None,
+    cache_elapsed: Optional[float] = None,
+    cache_label: Optional[str] = None,
+) -> None:
+    parts = []
+    if llm_elapsed is not None:
+        parts.append(f"LLM: `{format_elapsed(llm_elapsed)}`")
+    if cache_elapsed is not None:
+        label = cache_label or "cache"
+        parts.append(f"{label}: `{format_elapsed(cache_elapsed)}`")
+    if parts:
+        st.caption(" | ".join(parts))
+
+
+def init_session() -> None:
+    ensure_messages()
+
+    if "llm_state" not in st.session_state:
+        session_set("llm_state", load_llm_state())
+
+    if "ollama_client" not in st.session_state:
+        session_set("ollama_client", load_ollama_client())
+
+def retrieve_contexts(rag: Optional[Any], query: str, label: str) -> List[str]:
+    if rag is None:
+        return []
+
+    try:
+        return rag.hybrid_search(query, top_k=RAG_TOP_K, verbose=False)
+    except TypeError:
         try:
-            st.session_state.gemini = load_gemini()
-            st.session_state.gemini.new_chat()
-        except Exception as e:
-            st.session_state.gemini = None
-            st.session_state.gemini_error = str(e)
-            
-    # THÊM MỚI: Init Qwen local client vào session
-    if "qwen" not in st.session_state:
-        st.session_state.qwen = load_qwen()
+            return rag.hybrid_search(query, top_k=RAG_TOP_K)
+        except Exception as exc:
+            error = str(exc)
+            set_rag_load_error(label, error)
+            st.warning(f"Không thể truy xuất context từ {label}: {error}")
+            return []
+    except Exception as exc:
+        error = str(exc)
+        set_rag_load_error(label, error)
+        st.warning(f"Không thể truy xuất context từ {label}: {error}")
+        return []
 
-    if "rag" not in st.session_state:
-        st.session_state.rag = load_rag()
+
+def release_rag_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
-# ── Helper: process query ─────────────────────────────────────────────────────
+def retrieve_contexts_from_cache(
+    *,
+    query: str,
+    cache_dir_key: str,
+    encoder_key: str,
+    label: str,
+    encoder_name: Optional[str] = None,
+) -> tuple[List[str], bool, Optional[str]]:
+    rag = None
+    try:
+        rag = load_rag(
+            cache_dir_key=cache_dir_key,
+            encoder_key=encoder_key,
+            encoder_name=encoder_name,
+        )
+        if rag is None:
+            return [], False, get_rag_load_error(cache_dir_key)
 
-def process_query(query: str):
-    """Gửi query → RAG → Mô hình AI (Gemini và Qwen), lưu vào session state."""
+        contexts = retrieve_contexts(rag, query, label)
+        if not contexts:
+            error = get_rag_load_error(cache_dir_key) or f"Không tìm thấy context phù hợp từ `{cache_dir_key}`."
+            return [], False, error
+        return contexts, True, None
+    finally:
+        del rag
+        release_rag_memory()
+
+
+def render_sources(title: str, sources: List[str]) -> None:
+    if not sources:
+        return
+
+    with st.expander(title, expanded=False):
+        for i, ctx in enumerate(sources, 1):
+            st.markdown(f'<span class="source-badge">Nguồn {i}</span>', unsafe_allow_html=True)
+            st.caption(ctx[:500] + "..." if len(ctx) > 500 else ctx)
+
+
+def render_streamed_answer(
+    *,
+    label: str,
+    avatar: str,
+    query: str,
+    contexts: Optional[List[str]],
+    use_rag: bool,
+    llm_state: Dict[str, Any],
+    cache_elapsed: Optional[float] = None,
+    cache_label: Optional[str] = None,
+) -> tuple[str, float]:
+    from src.rag.llm import stream_llm_answer
+
+    response = ""
+    llm_started = perf_counter()
+    st.caption(label)
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        try:
+            for chunk in stream_llm_answer(
+                llm_state,
+                query=query,
+                results=contexts or [],
+                model=llm_state["config"]["llm_model"],
+                use_rag=use_rag,
+            ):
+                response += chunk
+                placeholder.markdown(response + "▌")
+            placeholder.markdown(response or "_Không có nội dung trả lời._")
+        except Exception as exc:
+            response = f"Lỗi xử lý: {exc}"
+            placeholder.markdown(response)
+        llm_elapsed = perf_counter() - llm_started
+        render_timing(llm_elapsed=llm_elapsed, cache_elapsed=cache_elapsed, cache_label=cache_label)
+    return response, llm_elapsed
+
+
+def render_unavailable_answer(
+    label: str,
+    avatar: str,
+    message: str,
+    detail: Optional[str] = None,
+    cache_elapsed: Optional[float] = None,
+    cache_label: Optional[str] = None,
+) -> str:
+    st.caption(label)
+    warning_text = f"{message}\n\nChi tiết: {detail}" if detail else message
+    with st.chat_message("assistant"):
+        st.warning(warning_text)
+        render_timing(cache_elapsed=cache_elapsed, cache_label=cache_label)
+    return f"Lỗi: {warning_text}"
+
+
+def process_query(query: str) -> None:
     if not query.strip():
         return
 
-    # Thêm user message
-    st.session_state.messages.append({
-        "role": "user",
-        "content": query,
-    })
+    messages = ensure_messages()
+    messages.append({"role": "user", "content": query})
 
-    # Lấy RAG context nếu có
-    contexts = []
-    rag = st.session_state.get("rag")
-    if rag is not None:
-        try:
-            contexts = rag.hybrid_search(query, top_k=3)
-        except Exception:
-            contexts = []
+    with st.chat_message("user"):
+        st.markdown(query)
 
-    # UI: Chia 2 cột để render câu trả lời song song
-    col_gemini, col_qwen = st.columns(2)
-    
-    full_response_gemini = ""
-    full_response_qwen = ""
+    llm_state = session_get("llm_state") or load_llm_state()
+    answers: List[Dict[str, Any]] = []
 
-    # CỘT TRÁI: Gemini
-    with col_gemini:
-        st.caption("🤖 **Gemini AI**")
-        with st.chat_message("assistant", avatar="⚖️"):
-            gemini = st.session_state.get("gemini")
-            if gemini is None:
-                st.error("❌ Gemini chưa được khởi tạo.")
-            else:
-                placeholder_g = st.empty()
-                try:
-                    for chunk in gemini.answer_stream(query, contexts=contexts if contexts else None):
-                        full_response_gemini += chunk
-                        placeholder_g.markdown(full_response_gemini + "▌")
-                    placeholder_g.markdown(full_response_gemini)
-                except Exception as e:
-                    full_response_gemini = f"⚠️ Lỗi: {str(e)}"
-                    placeholder_g.markdown(full_response_gemini)
+    no_rag_answer, no_rag_llm_elapsed = render_streamed_answer(
+        label="1. Qwen 2.5 - Không RAG",
+        avatar="",
+        query=query,
+        contexts=[],
+        use_rag=False,
+        llm_state=llm_state,
+    )
+    answers.append(
+        {
+            "key": "no_rag",
+            "label": "1. Qwen 2.5 - Không RAG",
+            "avatar": "",
+            "content": no_rag_answer,
+            "sources": [],
+            "timing": {"llm": no_rag_llm_elapsed},
+        }
+    )
 
-    # CỘT PHẢI: Qwen
-    with col_qwen:
-        st.caption("🦙 **Qwen 2.5 (7B Local)**")
-        with st.chat_message("assistant", avatar="🦙"):
-            qwen_client = st.session_state.get("qwen")
-            if qwen_client is None:
-                st.error("❌ Không thể kết nối Qwen Local.")
-            else:
-                placeholder_q = st.empty()
-                try:
-                    system_prompt = """Bạn là **Trợ lý Pháp Luật AI** chuyên về Pháp Luật Việt Nam.
+    default_cache_started = perf_counter()
+    default_contexts, default_ready, default_error = retrieve_contexts_from_cache(
+        query=query,
+        cache_dir_key="cache_dir",
+        encoder_key="encoder",
+        label="cache_dir",
+    )
+    default_cache_elapsed = perf_counter() - default_cache_started
+    default_llm_elapsed = None
+    if not default_ready:
+        default_answer = render_unavailable_answer(
+            "2. Qwen 2.5 + RAG cache_dir",
+            "",
+            "RAG `cache_dir` chưa sẵn sàng hoặc chưa load được dữ liệu.",
+            detail=default_error,
+            cache_elapsed=default_cache_elapsed,
+            cache_label="cache_dir",
+        )
+    else:
+        default_answer, default_llm_elapsed = render_streamed_answer(
+            label="2. Qwen 2.5 + RAG cache_dir",
+            avatar="",
+            query=query,
+            contexts=default_contexts,
+            use_rag=True,
+            llm_state=llm_state,
+            cache_elapsed=default_cache_elapsed,
+            cache_label="cache_dir",
+        )
+        render_sources("Nguồn tham chiếu - cache_dir", default_contexts)
+    answers.append(
+        {
+            "key": "rag_default",
+            "label": "2. Qwen 2.5 + RAG cache_dir",
+            "avatar": "",
+            "content": default_answer,
+            "sources": default_contexts,
+            "timing": {"llm": default_llm_elapsed, "cache": default_cache_elapsed, "cache_label": "cache_dir"},
+        }
+    )
 
-                    NHIỆM VỤ:
-                    - Trả lời các câu hỏi về pháp luật Việt Nam một cách chính xác, rõ ràng.
-                    - Trích dẫn cụ thể Nghị định, Điều khoản liên quan khi có thể.
-                    - Nếu được cung cấp ngữ cảnh từ cơ sở dữ liệu luật, ưu tiên sử dụng thông tin đó.
+    halong_cache_started = perf_counter()
+    halong_contexts, halong_ready, halong_error = retrieve_contexts_from_cache(
+        query=query,
+        cache_dir_key="cache_dir_halong",
+        encoder_key="encoder_halong",
+        encoder_name=get_halong_encoder_name(),
+        label="cache_dir_halong",
+    )
+    halong_cache_elapsed = perf_counter() - halong_cache_started
+    halong_llm_elapsed = None
+    if not halong_ready:
+        halong_answer = render_unavailable_answer(
+            "3. Qwen 2.5 + RAG cache_dir_halong",
+            "",
+            "RAG `cache_dir_halong` chưa sẵn sàng hoặc chưa load được dữ liệu.",
+            detail=halong_error,
+            cache_elapsed=halong_cache_elapsed,
+            cache_label="cache_dir_halong",
+        )
+    else:
+        halong_answer, halong_llm_elapsed = render_streamed_answer(
+            label="3. Qwen 2.5 + RAG cache_dir_halong",
+            avatar="",
+            query=query,
+            contexts=halong_contexts,
+            use_rag=True,
+            llm_state=llm_state,
+            cache_elapsed=halong_cache_elapsed,
+            cache_label="cache_dir_halong",
+        )
+        render_sources("Nguồn tham chiếu - cache_dir_halong", halong_contexts)
+    answers.append(
+        {
+            "key": "rag_halong",
+            "label": "3. Qwen 2.5 + RAG cache_dir_halong",
+            "avatar": "",
+            "content": halong_answer,
+            "sources": halong_contexts,
+            "timing": {"llm": halong_llm_elapsed, "cache": halong_cache_elapsed, "cache_label": "cache_dir_halong"},
+        }
+    )
 
-                    QUY TẮC:
-                    1. Trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu.
-                    2. Nếu không có đủ thông tin, hãy nói rõ và khuyến khích tham khảo luật sư.
-                    3. KHÔNG bịa đặt thông tin pháp lý không chắc chắn.
-                    4. Định dạng câu trả lời rõ ràng, dùng danh sách khi phù hợp.
-
-                    Bắt đầu mỗi câu trả lời bằng một câu tóm tắt ngắn, sau đó giải thích chi tiết."""
-                    
-                    if contexts:
-                        context_text = "\n---\n".join(contexts)
-                        prompt_with_rag = f"Thông tin tham chiếu:\n{context_text}\n\nCâu hỏi: {query}"
-                    else:
-                        prompt_with_rag = query
-
-                    stream = qwen_client.chat(
-                        model='qwen2.5:7b',
-                        messages=[
-                            {'role': 'system', 'content': system_prompt},
-                            {'role': 'user', 'content': prompt_with_rag}
-                        ],
-                        stream=True,
-                    )
-                    for chunk in stream:
-                        full_response_qwen += chunk['message']['content']
-                        placeholder_q.markdown(full_response_qwen + "▌")
-                    placeholder_q.markdown(full_response_qwen)
-                except Exception as e:
-                    full_response_qwen = f"⚠️ Lỗi xử lý: {str(e)}"
-                    placeholder_q.markdown(full_response_qwen)
-
-    # Hiển thị nguồn tham chiếu dùng chung
-    if contexts:
-        with st.expander("📚 Nguồn tham chiếu từ CSDL Luật", expanded=False):
-            for i, ctx in enumerate(contexts, 1):
-                st.markdown(
-                    f'<span class="source-badge">Nguồn {i}</span>', 
-                    unsafe_allow_html=True
-                )
-                st.caption(ctx[:300] + "..." if len(ctx) > 300 else ctx)
-
-    # Lưu lịch sử chung dạng dual_assistant
-    st.session_state.messages.append({
-        "role": "dual_assistant",
-        "content_gemini": full_response_gemini,
-        "content_qwen": full_response_qwen,
-        "sources": contexts,
-    })
+    messages.append({"role": "triple_assistant", "answers": answers})
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-
-def render_sidebar():
-    with st.sidebar:
-        # Logo & Title
-        st.markdown("""
-        <div style="text-align: center; padding: 1rem 0 0.5rem;">
-            <div style="font-size: 3rem;">⚖️</div>
-            <div style="font-weight: 700; font-size: 1.1rem; color: #9D97FF;">Trợ lý Pháp luật AI</div>
-            <div style="color: #5A5D7A; font-size: 0.78rem;">Pháp luật Việt Nam</div>
+def render_model_card(index: int, name: str, meta: str, ready: bool) -> None:
+    status_class = "status-ok" if ready else "status-warn"
+    status_text = "Sẵn sàng" if ready else "Chưa sẵn sàng"
+    st.markdown(
+        f"""
+        <div class="model-card">
+            <div class="model-name">{index}. {name}</div>
+            <div class="model-meta">{meta}</div>
+            <div class="{status_class}">{status_text}</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar() -> None:
+    with st.sidebar:
+        st.markdown(
+            """
+            <div style="text-align: center; padding: 1rem 0 0.5rem;">
+                <div style="font-size: 2rem; font-weight: 700; color: #9D97FF;">AI</div>
+                <div style="font-weight: 700; font-size: 1.1rem; color: #9D97FF;">Trợ lý Pháp luật AI</div>
+                <div style="color: #A7ABC4; font-size: 0.78rem;">So sánh 2 embedding RAG</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         st.divider()
 
-        # RAG Status
-        rag_active = st.session_state.get("rag") is not None
-        if rag_active:
-            st.markdown('<div style="text-align:center"><span class="status-rag-on">🟢 RAG: Đang hoạt động</span></div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="text-align:center"><span class="status-rag-off">🟡 RAG: Chưa có dữ liệu</span></div>', unsafe_allow_html=True)
-            st.caption("Chạy data pipeline để kích hoạt RAG.")
+        llm_state = session_get("llm_state") or {"config": {"llm_model": "qwen2.5:7b"}}
+        model_name = llm_state["config"]["llm_model"]
+        ollama_ready = session_get("ollama_client") is not None
+        rag_default_ready = cache_artifacts_ready("cache_dir")
+        rag_halong_ready = cache_artifacts_ready("cache_dir_halong")
+
+        st.caption(f"Model LLM đang dùng: `{model_name}`")
+        render_model_card(1, "Không RAG", "Trả lời trực tiếp câu hỏi", ollama_ready)
+        render_model_card(2, "RAG cache_dir", f"Cache embedding: {get_encoder_name()}", ollama_ready and rag_default_ready)
+        render_model_card(3, "RAG cache_dir_halong", f"Cache embedding: {get_halong_encoder_name()}", ollama_ready and rag_halong_ready)
 
         st.divider()
 
-        # Stats
-        msg_count = len([m for m in st.session_state.get("messages", []) if m["role"] == "user"])
+        msg_count = len([m for m in session_get("messages", []) if m.get("role") == "user"])
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("💬 Câu hỏi", msg_count)
+            st.metric("Câu hỏi", msg_count)
         with col2:
-            st.metric("🔍 Nguồn RAG", "✓" if rag_active else "✗")
+            ready_count = sum(
+                [
+                    ollama_ready,
+                    ollama_ready and rag_default_ready,
+                    ollama_ready and rag_halong_ready,
+                ]
+            )
+            st.metric("Sẵn sàng", f"{ready_count}/3")
 
         st.divider()
 
-        # Clear button
-        if st.button("🗑️ Xóa lịch sử", use_container_width=True, type="secondary"):
-            st.session_state.messages = []
-            if st.session_state.get("gemini"):
-                st.session_state.gemini.new_chat()
+        if st.button("Xóa lịch sử", use_container_width=True, type="secondary"):
+            session_set("messages", [])
             st.rerun()
 
         st.divider()
+        st.caption("PTIT - NLP - Deep Learning Project")
+        st.caption("Powered by Ollama + Hybrid RAG")
 
-        st.caption("🏫 PTIT · NLP · Deep Learning Project")
-        st.caption("Powered by Gemini 2.5 Flash & Qwen 2.5 + Hybrid RAG")
+
+def render_saved_answer(answer: Dict[str, Any]) -> None:
+    st.caption(answer.get("label", "Assistant"))
+    with st.chat_message("assistant"):
+        st.markdown(answer.get("content", ""))
+        timing = answer.get("timing", {})
+        render_timing(
+            llm_elapsed=timing.get("llm"),
+            cache_elapsed=timing.get("cache"),
+            cache_label=timing.get("cache_label"),
+        )
+    render_sources(f"Nguồn tham chiếu - {answer.get('label', '')}", answer.get("sources", []))
 
 
-# ── Main Chat Area ────────────────────────────────────────────────────────────
+def render_chat() -> None:
+    st.markdown('<p class="gradient-title">Trợ lý Pháp luật AI</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="subtitle">Một LLM, ba chế độ trả lời: không RAG, RAG cache_dir, RAG cache_dir_halong.</p>',
+        unsafe_allow_html=True,
+    )
 
-def render_chat():
-    # Header
-    st.markdown('<p class="gradient-title">🚦 Trợ lý Pháp luật AI</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Hỏi đáp Pháp luật Việt Nam · Chế độ so sánh 2 Model</p>', unsafe_allow_html=True)
+    messages = session_get("messages", [])
+    if not messages:
+        st.markdown(
+            """
+            <div class="welcome-card">
+                <h3>Xin chào! Hãy đặt một câu hỏi pháp luật Việt Nam.</h3>
+                <p style="color: #A7ABC4; font-size: 0.92rem;">
+                    Hệ thống sẽ lần lượt trả lời bằng cùng một model LLM:
+                    bản không RAG, bản RAG với cache mặc định, và bản RAG với cache Halong.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # Welcome screen khi chưa có message
-    if not st.session_state.messages:
-        st.markdown("""
-        <div class="welcome-card">
-            <h3>👋 Xin chào! Tôi có thể giúp gì cho bạn?</h3>
-            <p style="color: #6B7280; font-size: 0.9rem;">
-                Hãy đặt câu hỏi về pháp luật Việt Nam. 
-                Hệ thống sẽ tra cứu cơ sở dữ liệu và hiển thị câu trả lời từ cả hai mô hình (Gemini và Qwen) để bạn so sánh.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("**💡 Câu hỏi gợi ý:**")
+        st.markdown("**Câu hỏi gợi ý:**")
         cols = st.columns(2)
-        for i, q in enumerate(EXAMPLE_QUESTIONS):
+        for i, question in enumerate(EXAMPLE_QUESTIONS):
             with cols[i % 2]:
-                if st.button(q, key=f"example_{i}", use_container_width=True):
-                    process_query(q)
+                if st.button(question, key=f"example_{i}", use_container_width=True):
+                    process_query(question)
                     st.rerun()
 
-    # Render chat history
-    for msg in st.session_state.messages:
-        role = msg["role"]
-        
-        # User message
+    for msg in messages:
+        role = msg.get("role")
         if role == "user":
-            with st.chat_message("user", avatar="🧑‍💻"):
-                st.markdown(msg["content"])
-                
-        # Dual assistant messages
+            with st.chat_message("user"):
+                st.markdown(msg.get("content", ""))
+        elif role == "triple_assistant":
+            for answer in msg.get("answers", []):
+                render_saved_answer(answer)
         elif role == "dual_assistant":
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.caption("🤖 **Gemini AI**")
-                with st.chat_message("assistant", avatar="⚖️"):
-                    st.markdown(msg.get("content_gemini", ""))
-                    
-            with col2:
-                st.caption("🦙 **Qwen 2.5 (7B Local)**")
-                with st.chat_message("assistant", avatar="🦙"):
-                    st.markdown(msg.get("content_qwen", ""))
-
-            # Nguồn tham chiếu chung
-            if msg.get("sources"):
-                with st.expander("📚 Nguồn tham chiếu chung", expanded=False):
-                    for i, ctx in enumerate(msg["sources"], 1):
-                        st.markdown(f'<span class="source-badge">Nguồn {i}</span>', unsafe_allow_html=True)
-                        st.caption(ctx[:300] + "..." if len(ctx) > 300 else ctx)
+            legacy_answers = [
+                {
+                    "label": "Gemini AI",
+                    "avatar": "",
+                    "content": msg.get("content_gemini", ""),
+                    "sources": msg.get("sources", []),
+                },
+                {
+                    "label": "Qwen 2.5",
+                    "avatar": "",
+                    "content": msg.get("content_qwen", ""),
+                    "sources": msg.get("sources", []),
+                },
+            ]
+            for answer in legacy_answers:
+                render_saved_answer(answer)
 
 
-def render_input():
-    """Render text chat input."""
-    if prompt := st.chat_input("Hỏi về pháp luật... (VD: Vượt đèn đỏ phạt bao nhiêu?)"):
+def render_input() -> None:
+    prompt = st.chat_input("Hỏi về pháp luật... (VD: Vượt đèn đỏ phạt bao nhiêu?)")
+    if prompt:
         process_query(prompt)
         st.rerun()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def main():
+def main() -> None:
     init_session()
     render_sidebar()
     render_chat()
     render_input()
 
-    # Gemini error banner
-    if st.session_state.get("gemini") is None:
-        st.error(
-            f"❌ **Lỗi khởi tạo Gemini API**\n\n"
-            f"{st.session_state.get('gemini_error', 'Unknown error')}\n\n"
-            f"Kiểm tra `api_key` trong file `.env`."
-        )
+    if session_get("ollama_client") is None:
+        st.error("Không thể import `ollama`. Cài bằng `pip install ollama`, sau đó chạy `ollama pull` model trong YAML.")
 
 
 if __name__ == "__main__":

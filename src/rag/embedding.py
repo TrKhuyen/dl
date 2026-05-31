@@ -9,23 +9,59 @@ from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import Any, Dict, Sequence
 
-import numpy as np
-import pandas as pd
-from sentence_transformers import SentenceTransformer
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+SentenceTransformer = None
+SENTENCE_TRANSFORMER_IMPORT_ERROR = None
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = str(ROOT_DIR / "configs" / "rag" / "vector_db.yaml")
 
 
+def require_sentence_transformer() -> Any:
+    global SentenceTransformer, SENTENCE_TRANSFORMER_IMPORT_ERROR
+    if SentenceTransformer is None and SENTENCE_TRANSFORMER_IMPORT_ERROR is None:
+        try:
+            from sentence_transformers import SentenceTransformer as SentenceTransformerCls
+
+            SentenceTransformer = SentenceTransformerCls
+        except Exception as exc:
+            SENTENCE_TRANSFORMER_IMPORT_ERROR = exc
+    if SentenceTransformer is None:
+        raise ImportError("Chưa cài `sentence-transformers`. Hãy chạy: pip install sentence-transformers")
+    return SentenceTransformer
+
+
+def require_numpy() -> Any:
+    if np is None:
+        raise ImportError("Chưa cài `numpy`. Hãy chạy: pip install numpy")
+    return np
+
+
+def require_pandas() -> Any:
+    if pd is None:
+        raise ImportError("Chưa cài `pandas`. Hãy chạy: pip install pandas")
+    return pd
+
+
 def safe_str(value: Any) -> str:
     if value is None:
         return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
+    if pd is not None:
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
     return str(value)
 
 
@@ -63,11 +99,21 @@ def write_json(path: str, data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def cache_meta_matches(path: str, expected: Dict[str, Any]) -> bool:
+def cache_mtime_ignore_keys(config: Dict[str, Any]) -> set[str]:
+    if config.get("strict_csv_mtime", True):
+        return set()
+    return {"csv_mtime_ns"}
+
+
+def cache_meta_matches(path: str, expected: Dict[str, Any], ignore_keys: set[str] | None = None) -> bool:
     if not os.path.exists(path):
         return False
     try:
-        return read_json(path) == expected
+        actual = read_json(path)
+        if ignore_keys:
+            actual = {k: v for k, v in actual.items() if k not in ignore_keys}
+            expected = {k: v for k, v in expected.items() if k not in ignore_keys}
+        return actual == expected
     except Exception:
         return False
 
@@ -114,13 +160,14 @@ def load_chunk_data(
     chunking_columns: Sequence[str],
     legacy_columns: Sequence[str],
 ) -> Dict[str, Any]:
+    pd_module = require_pandas()
     print("Đang đọc chunk CSV...")
 
     csv_path = config["csv_path"]
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Không tìm thấy CSV: {csv_path}")
 
-    df = pd.read_csv(csv_path)
+    df = pd_module.read_csv(csv_path)
     raw_context_column = get_raw_context_column(df)
     search_context_column = get_search_context_column(df, raw_context_column)
 
@@ -175,6 +222,7 @@ def embedding_meta(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_or_build_embeddings(state: Dict[str, Any]) -> np.ndarray:
+    np_module = require_numpy()
     config = state["config"]
     expected_meta = embedding_meta(state)
     path = embeddings_path(config)
@@ -188,7 +236,7 @@ def load_or_build_embeddings(state: Dict[str, Any]) -> np.ndarray:
 
     if can_load:
         print("Đang tải embedding cache hợp lệ...")
-        embeddings = np.load(path)
+        embeddings = np_module.load(path)
         if embeddings.shape == (len(state["docs"]), state["dim"]):
             return embeddings.astype("float32", copy=False)
         print("Shape embedding cache không khớp. Build lại embedding...")
@@ -201,7 +249,7 @@ def load_or_build_embeddings(state: Dict[str, Any]) -> np.ndarray:
         normalize_embeddings=True,
     ).astype("float32")
 
-    np.save(path, embeddings)
+    np_module.save(path, embeddings)
     write_json(meta_path, expected_meta)
     print(f"Đã lưu embeddings: {path}")
     return embeddings
@@ -216,7 +264,8 @@ def build_embedding_state(
     chunk_data = load_chunk_data(config, chunking_columns, legacy_columns)
 
     print(f"Encoder:  {config['encoder_name']}")
-    encoder = SentenceTransformer(config["encoder_name"])
+    sentence_transformer_cls = require_sentence_transformer()
+    encoder = sentence_transformer_cls(config["encoder_name"])
 
     state = {
         "config": config,

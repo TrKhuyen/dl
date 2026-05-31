@@ -1,9 +1,11 @@
 paths:
   csv: data/processed/legal_chunks_2024_2026.csv
   cache_dir: data/processed/rag_cache_2024_2026
+  cache_dir_halong: data/processed/rag_cache_2024_2026_halong_embedding
 
 models:
   encoder: keepitreal/vietnamese-sbert
+  encoder_halong: hiieu/halong_embedding
   reranker: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
   llm: qwen2.5:7b
 
@@ -26,6 +28,7 @@ retrieval:
 
 cache:
   rebuild: false
+  strict_csv_mtime: false
   bm25_tokenizer_version: vi_legal_keep_accents_v1
 
 schema:
@@ -86,5 +89,3 @@ llm:
     Format trả lời bắt buộc:
     - Kết luận ngắn:
     - Căn cứ pháp lý:
-    - Giải thích:
-    - Lưu ý nếu có:

@@ -15,14 +15,28 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import faiss
-import numpy as np
-from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    import faiss
+except ImportError:
+    faiss = None
+
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
+
+CrossEncoder = None
+CROSS_ENCODER_IMPORT_ERROR = None
 
 from src.rag.embedding import (
     build_embedding_state,
     cache_meta_matches,
+    cache_mtime_ignore_keys,
     compact_text,
     data_meta,
     embedding_meta,
@@ -38,6 +52,38 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = str(ROOT_DIR / "configs" / "rag" / "vector_db.yaml")
+
+
+def require_faiss() -> Any:
+    if faiss is None:
+        raise ImportError("Chưa cài `faiss`. Hãy cài faiss-cpu hoặc faiss-gpu trước khi load RAG.")
+    return faiss
+
+
+def require_numpy() -> Any:
+    if np is None:
+        raise ImportError("Chưa cài `numpy`. Hãy chạy: pip install numpy")
+    return np
+
+
+def require_bm25() -> Any:
+    if BM25Okapi is None:
+        raise ImportError("Chưa cài `rank_bm25`. Hãy chạy: pip install rank_bm25")
+    return BM25Okapi
+
+
+def require_cross_encoder() -> Any:
+    global CrossEncoder, CROSS_ENCODER_IMPORT_ERROR
+    if CrossEncoder is None and CROSS_ENCODER_IMPORT_ERROR is None:
+        try:
+            from sentence_transformers import CrossEncoder as CrossEncoderCls
+
+            CrossEncoder = CrossEncoderCls
+        except Exception as exc:
+            CROSS_ENCODER_IMPORT_ERROR = exc
+    if CrossEncoder is None:
+        raise ImportError("Chưa cài `sentence-transformers`. Hãy chạy: pip install sentence-transformers")
+    return CrossEncoder
 
 
 def read_yaml_config(path: str) -> Dict[str, Any]:
@@ -56,7 +102,9 @@ def build_runtime_config(
     settings: Dict[str, Any],
     csv_path: Optional[str] = None,
     cache_dir: Optional[str] = None,
+    cache_dir_key: str = "cache_dir",
     encoder_name: Optional[str] = None,
+    encoder_key: str = "encoder",
     reranker_name: Optional[str] = None,
     llm_model: Optional[str] = None,
     index_type: Optional[str] = None,
@@ -75,10 +123,20 @@ def build_runtime_config(
     retrieval = settings.get("retrieval", {})
     cache = settings.get("cache", {})
 
+    selected_cache_dir = cache_dir or paths.get(cache_dir_key, "")
+    if not selected_cache_dir and cache_dir_key == "cache_dir":
+        selected_cache_dir = paths.get("cache_dir", "")
+
+    selected_encoder = encoder_name or models.get(encoder_key, "")
+    if not selected_encoder and encoder_key == "encoder":
+        selected_encoder = models.get("encoder", "")
+
     config = {
         "csv_path": csv_path or paths.get("csv", ""),
-        "cache_dir": cache_dir or paths.get("cache_dir", ""),
-        "encoder_name": encoder_name or models.get("encoder", ""),
+        "cache_dir": selected_cache_dir,
+        "cache_dir_key": cache_dir_key,
+        "encoder_name": selected_encoder,
+        "encoder_key": encoder_key,
         "reranker_name": reranker_name or models.get("reranker", ""),
         "llm_model": llm_model or models.get("llm", ""),
         "index_type": (index_type or index.get("type", "hnsw")).lower(),
@@ -97,12 +155,17 @@ def build_runtime_config(
         "min_context_chars": int(retrieval.get("min_context_chars", 30)),
         "weak_score_threshold": float(retrieval.get("weak_score_threshold", -2.0)),
         "rebuild_cache": rebuild_cache if rebuild_cache is not None else bool(cache.get("rebuild", False)),
+        "strict_csv_mtime": bool(cache.get("strict_csv_mtime", False)),
     }
     validate_config(config)
     return config
 
 
 def validate_config(config: Dict[str, Any]) -> None:
+    if not config["cache_dir"]:
+        raise ValueError(f"cache_dir không được rỗng. Kiểm tra paths.{config['cache_dir_key']} trong YAML.")
+    if not config["encoder_name"]:
+        raise ValueError(f"encoder_name không được rỗng. Kiểm tra models.{config['encoder_key']} trong YAML.")
     if config["index_type"] not in {"hnsw", "ivf", "flat"}:
         raise ValueError("index_type phải là 'hnsw', 'ivf' hoặc 'flat'.")
     if config["batch_size"] <= 0:
@@ -166,7 +229,7 @@ def resolve_ivf_nlist(config: Dict[str, Any], n_docs: int) -> int:
         return max(1, min(int(config["ivf_nlist"]), max(1, n_docs)))
 
     if n_docs < 50_000:
-        return min(256, max(1, int(np.sqrt(n_docs))))
+        return min(256, max(1, int(n_docs ** 0.5)))
     if n_docs < 300_000:
         return 1024
     if n_docs < 700_000:
@@ -190,25 +253,30 @@ def faiss_meta(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_or_build_bm25(state: Dict[str, Any]) -> BM25Okapi:
+    bm25_cls = require_bm25()
     config = state["config"]
     expected_meta = bm25_meta(state)
     path = bm25_path(config)
     meta_path = bm25_meta_path(config)
+    ignore_keys = cache_mtime_ignore_keys(config)
 
     can_load = (
         not config["rebuild_cache"]
         and os.path.exists(path)
-        and cache_meta_matches(meta_path, expected_meta)
+        and cache_meta_matches(meta_path, expected_meta, ignore_keys=ignore_keys)
     )
 
     if can_load:
         print("Đang tải BM25 cache hợp lệ...")
         with open(path, "rb") as f:
-            return pickle.load(f)
+            bm25 = pickle.load(f)
+        if ignore_keys and not cache_meta_matches(meta_path, expected_meta):
+            write_json(meta_path, expected_meta)
+        return bm25
 
     print("Đang xây dựng BM25 index...")
     tokenized_corpus = [tokenize_vi(doc) for doc in state["docs"]]
-    bm25 = BM25Okapi(tokenized_corpus)
+    bm25 = bm25_cls(tokenized_corpus)
 
     with open(path, "wb") as f:
         pickle.dump(bm25, f)
@@ -219,6 +287,7 @@ def load_or_build_bm25(state: Dict[str, Any]) -> BM25Okapi:
 
 
 def apply_runtime_index_params(index: faiss.Index, config: Dict[str, Any], n_docs: int) -> None:
+    require_faiss()
     if config["index_type"] == "hnsw":
         index.hnsw.efSearch = config["hnsw_ef_search"]
     elif config["index_type"] == "ivf":
@@ -226,22 +295,23 @@ def apply_runtime_index_params(index: faiss.Index, config: Dict[str, Any], n_doc
 
 
 def build_faiss_index(state: Dict[str, Any]) -> faiss.Index:
+    faiss_module = require_faiss()
     config = state["config"]
     dim = state["dim"]
     embeddings = state["embeddings"]
 
     if config["index_type"] == "hnsw":
-        index = faiss.IndexHNSWFlat(dim, config["hnsw_m"], faiss.METRIC_INNER_PRODUCT)
+        index = faiss_module.IndexHNSWFlat(dim, config["hnsw_m"], faiss_module.METRIC_INNER_PRODUCT)
         index.hnsw.efConstruction = config["hnsw_ef_construction"]
         index.add(embeddings)
     elif config["index_type"] == "ivf":
         nlist = resolve_ivf_nlist(config, len(state["docs"]))
-        quantizer = faiss.IndexFlatIP(dim)
-        index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+        quantizer = faiss_module.IndexFlatIP(dim)
+        index = faiss_module.IndexIVFFlat(quantizer, dim, nlist, faiss_module.METRIC_INNER_PRODUCT)
         index.train(embeddings)
         index.add(embeddings)
     else:
-        index = faiss.IndexFlatIP(dim)
+        index = faiss_module.IndexFlatIP(dim)
         index.add(embeddings)
 
     apply_runtime_index_params(index, config, len(state["docs"]))
@@ -249,26 +319,30 @@ def build_faiss_index(state: Dict[str, Any]) -> faiss.Index:
 
 
 def load_or_build_faiss_index(state: Dict[str, Any]) -> faiss.Index:
+    faiss_module = require_faiss()
     config = state["config"]
     expected_meta = faiss_meta(state)
     path = faiss_index_path(config)
     meta_path = faiss_meta_path(config)
+    ignore_keys = cache_mtime_ignore_keys(config)
 
     can_load = (
         not config["rebuild_cache"]
         and os.path.exists(path)
-        and cache_meta_matches(meta_path, expected_meta)
+        and cache_meta_matches(meta_path, expected_meta, ignore_keys=ignore_keys)
     )
 
     if can_load:
         print(f"Đang tải FAISS {config['index_type'].upper()} index hợp lệ...")
-        index = faiss.read_index(path)
+        index = faiss_module.read_index(path)
         apply_runtime_index_params(index, config, len(state["docs"]))
+        if ignore_keys and not cache_meta_matches(meta_path, expected_meta):
+            write_json(meta_path, expected_meta)
         return index
 
     print(f"Đang xây dựng FAISS {config['index_type'].upper()} index...")
     index = build_faiss_index(state)
-    faiss.write_index(index, path)
+    faiss_module.write_index(index, path)
     write_json(meta_path, expected_meta)
 
     print(f"Đã lưu FAISS index: {path}")
@@ -279,7 +353,9 @@ def build_rag_system(
     config_path: str = DEFAULT_CONFIG_PATH,
     csv_path: Optional[str] = None,
     cache_dir: Optional[str] = None,
+    cache_dir_key: str = "cache_dir",
     encoder_name: Optional[str] = None,
+    encoder_key: str = "encoder",
     reranker_name: Optional[str] = None,
     llm_model: Optional[str] = None,
     index_type: Optional[str] = None,
@@ -302,7 +378,9 @@ def build_rag_system(
         settings,
         csv_path=csv_path,
         cache_dir=cache_dir,
+        cache_dir_key=cache_dir_key,
         encoder_name=encoder_name,
+        encoder_key=encoder_key,
         reranker_name=reranker_name,
         llm_model=llm_model,
         index_type=index_type,
@@ -326,14 +404,17 @@ def build_rag_system(
         }
     )
 
+    state["index"] = load_or_build_faiss_index(state)
+    state.pop("embeddings", None)
+    state["bm25"] = load_or_build_bm25(state)
+
     if load_reranker:
         print(f"Reranker: {config['reranker_name']}")
-        state["reranker"] = CrossEncoder(config["reranker_name"])
+        cross_encoder_cls = require_cross_encoder()
+        state["reranker"] = cross_encoder_cls(config["reranker_name"])
     else:
         print("Bỏ qua reranker, chỉ build embedding + BM25 + FAISS.")
 
-    state["bm25"] = load_or_build_bm25(state)
-    state["index"] = load_or_build_faiss_index(state)
     return state
 
 
@@ -377,6 +458,7 @@ def vector_search(state: Dict[str, Any], query: str, k: int) -> Tuple[List[int],
 
 
 def bm25_search(state: Dict[str, Any], query: str, k: int) -> Tuple[List[int], Dict[int, float]]:
+    np_module = require_numpy()
     tokens = tokenize_vi(query)
     if not tokens:
         return [], {}
@@ -386,8 +468,8 @@ def bm25_search(state: Dict[str, Any], query: str, k: int) -> Tuple[List[int], D
     if k <= 0:
         return [], {}
 
-    top_idx = np.argpartition(scores, -k)[-k:]
-    top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
+    top_idx = np_module.argpartition(scores, -k)[-k:]
+    top_idx = top_idx[np_module.argsort(scores[top_idx])[::-1]]
 
     indices = [int(i) for i in top_idx]
     score_map = {int(i): float(scores[i]) for i in top_idx}
@@ -499,6 +581,7 @@ def hybrid_search(
     rerank_top_n: Optional[int] = None,
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
+    np_module = require_numpy()
     config = state["config"]
     final_top_k = top_k or config["final_top_k"]
     vector_k = vector_top_k or config["vector_top_k"]
@@ -537,10 +620,10 @@ def hybrid_search(
     pairs = [[query, doc] for doc in candidate_docs]
 
     t2 = time.perf_counter()
-    rerank_scores = np.asarray(state["reranker"].predict(pairs, batch_size=16), dtype="float32")
+    rerank_scores = np_module.asarray(state["reranker"].predict(pairs, batch_size=16), dtype="float32")
     t_rerank = (time.perf_counter() - t2) * 1000
 
-    ranked_local_indices = np.argsort(rerank_scores)[::-1][:final_top_k]
+    ranked_local_indices = np_module.argsort(rerank_scores)[::-1][:final_top_k]
     results: List[Dict[str, Any]] = []
     for rank, local_i in enumerate(ranked_local_indices, start=1):
         doc_idx = candidate_indices[int(local_i)]
@@ -613,7 +696,10 @@ def HybridRAGSystem(
     config_path: str = DEFAULT_CONFIG_PATH,
     csv_path: Optional[str] = None,
     cache_dir: Optional[str] = None,
+    cache_dir_key: str = "cache_dir",
     cache_file: Optional[str] = None,
+    encoder_name: Optional[str] = None,
+    encoder_key: str = "encoder",
     index_type: Optional[str] = None,
     rebuild_cache: Optional[bool] = None,
     vector_top_k: Optional[int] = None,
@@ -634,6 +720,9 @@ def HybridRAGSystem(
         config_path=config_path,
         csv_path=csv_path,
         cache_dir=cache_dir,
+        cache_dir_key=cache_dir_key,
+        encoder_name=encoder_name,
+        encoder_key=encoder_key,
         llm_model=llm_model,
         index_type=index_type,
         rebuild_cache=rebuild_cache,
@@ -689,8 +778,18 @@ def parse_args() -> Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="YAML config cho vector DB.")
     parser.add_argument("--csv", default=None, help="Override paths.csv trong YAML.")
     parser.add_argument("--cache-dir", default=None, help="Override paths.cache_dir trong YAML.")
+    parser.add_argument(
+        "--cache-dir-key",
+        default="cache_dir",
+        help="Key trong paths dùng làm cache dir, ví dụ: cache_dir hoặc cache_dir_halong.",
+    )
     parser.add_argument("--index-type", default=None, choices=["hnsw", "ivf", "flat"], help="Override index.type trong YAML.")
     parser.add_argument("--encoder-name", default=None, help="Override models.encoder trong YAML.")
+    parser.add_argument(
+        "--encoder-key",
+        default="encoder",
+        help="Key trong models dùng làm encoder, ví dụ: encoder hoặc encoder_halong.",
+    )
     parser.add_argument("--reranker-name", default=None, help="Override models.reranker trong YAML.")
     parser.add_argument("--batch-size", type=int, default=None, help="Override index.batch_size trong YAML.")
     parser.add_argument("--vector-top-k", type=int, default=None, help="Override retrieval.vector_top_k trong YAML.")
@@ -723,7 +822,9 @@ def main() -> None:
         config_path=args.config,
         csv_path=args.csv,
         cache_dir=args.cache_dir,
+        cache_dir_key=args.cache_dir_key,
         encoder_name=args.encoder_name,
+        encoder_key=args.encoder_key,
         reranker_name=args.reranker_name,
         index_type=args.index_type,
         rebuild_cache=args.rebuild_cache,

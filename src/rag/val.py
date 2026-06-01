@@ -39,6 +39,10 @@ RAG_RUNS = (
 )
 
 
+def count_cjk_chars(text: str) -> int:
+    return sum(1 for char in text if 0x4E00 <= ord(char) <= 0x9FFF)
+
+
 def configure_stdout() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -121,6 +125,19 @@ def answer_with_rag(
     )
 
 
+def should_regenerate_answer(answer: str, args: argparse.Namespace) -> tuple[bool, str]:
+    stripped_answer = answer.strip()
+    if not stripped_answer:
+        return True, "empty answer"
+
+    if not args.allow_cjk_output:
+        cjk_count = count_cjk_chars(stripped_answer)
+        if cjk_count > 0:
+            return True, f"CJK chars={cjk_count}"
+
+    return False, ""
+
+
 def run_validation(records: List[Dict[str, str]], args: argparse.Namespace) -> None:
     total = len(records)
     if total == 0:
@@ -151,9 +168,13 @@ def run_validation(records: List[Dict[str, str]], args: argparse.Namespace) -> N
         try:
             for index, record in enumerate(records, start=1):
                 query = record["instruction"].strip()
-                if record.get(field, "").strip() and not args.overwrite:
+                existing_answer = record.get(field, "")
+                needs_regenerate, regenerate_reason = should_regenerate_answer(existing_answer, args)
+                if existing_answer.strip() and not args.overwrite and not needs_regenerate:
                     print(f"[{field}] {index}/{total} skipped")
                     continue
+                if existing_answer.strip() and not args.overwrite and needs_regenerate:
+                    print(f"[{field}] {index}/{total} regenerate | {regenerate_reason}")
 
                 print(f"[{field}] {index}/{total}")
                 item_started_at = time.perf_counter()
@@ -166,7 +187,11 @@ def run_validation(records: List[Dict[str, str]], args: argparse.Namespace) -> N
                 last_error = None
                 for attempt in range(1, args.max_retries + 2):
                     try:
-                        record[field] = answer_with_rag(state, query, args)
+                        candidate_answer = answer_with_rag(state, query, args)
+                        invalid_answer, invalid_reason = should_regenerate_answer(candidate_answer, args)
+                        if invalid_answer:
+                            raise ValueError(f"Invalid generated answer: {invalid_reason}")
+                        record[field] = candidate_answer
                         last_error = None
                         break
                     except Exception as exc:
@@ -226,6 +251,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-retries", type=int, default=1, help="Retry each failed LLM call this many times before stopping.")
     parser.add_argument("--retry-sleep", type=float, default=5.0, help="Seconds to wait between retries.")
     parser.add_argument("--overwrite", action="store_true", help="Recompute fields that already have answers.")
+    parser.add_argument(
+        "--allow-cjk-output",
+        action="store_true",
+        help="Allow generated answers containing CJK characters. By default, CJK output is regenerated.",
+    )
     parser.add_argument("--rebuild-cache", action="store_true", default=None, help="Rebuild embedding, BM25, and FAISS cache.")
     parser.add_argument("--verbose", action="store_true", help="Print detailed retrieval logs.")
     return parser.parse_args()

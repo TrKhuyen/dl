@@ -1,14 +1,17 @@
+import os
+
 from openai import OpenAI
 
 class LocalQueryRewriter:
-    def __init__(self):
+    def __init__(self, model=None, base_url=None):
         """
         Khởi tạo kết nối đến máy chủ Ollama đang chạy ngầm trên máy tính.
         Không tốn tiền, không cần mạng!
         """
+        self.model = model or os.getenv("OLLAMA_REWRITER_MODEL", "qwen2.5:7b")
         # Trỏ thẳng vào cổng 11434 mặc định của hệ thống Ollama trên máy bạn
         self.client = OpenAI(
-            base_url="http://localhost:11434/v1",
+            base_url=base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             api_key="ollama" # Bắt buộc phải điền nhưng điền chữ gì cũng được (API Key ảo)
         )
 
@@ -46,7 +49,7 @@ class LocalQueryRewriter:
 
         try:
             response = self.client.chat.completions.create(
-                model="qwen2.5:1.5b", # Tên model bạn vừa tải bằng Ollama
+                model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Câu bị lỗi: {noisy_query}"}
@@ -55,7 +58,7 @@ class LocalQueryRewriter:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            return f"❌ Lỗi kết nối Ollama (Chưa bật phần mềm Ollama?): {e}"
+            return f"❌ Lỗi kết nối Ollama hoặc chưa pull model `{self.model}`: {e}"
 
 # --- KHỐI TEST ---
 if __name__ == "__main__":

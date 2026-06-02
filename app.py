@@ -1,4 +1,4 @@
-"""
+﻿"""
 Trợ lý Pháp luật AI - giao diện Streamlit so sánh 3 chế độ trả lời.
 
 Chạy:
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gc
 import sys
+import tempfile
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, List, Optional
@@ -27,6 +28,7 @@ DEFAULT_ENCODER = "keepitreal/vietnamese-sbert"
 DEFAULT_HALONG_ENCODER = "hiieu/halong_embedding"
 RAG_TOP_K = 3
 RAG_LOAD_ERRORS_KEY = "rag_load_errors"
+WHISPER_MODEL_SIZE = "small"
 REQUIRED_CACHE_FILES = (
     "embedding_cache.npy",
     "embedding_cache_meta.json",
@@ -248,6 +250,30 @@ def load_ollama_client() -> Optional[Any]:
         return None
 
 
+@st.cache_resource(show_spinner="Đang tải Whisper...")
+def load_voice_assistant(model_size: str = WHISPER_MODEL_SIZE) -> Optional[Any]:
+    try:
+        from src.whisper.audio_processor import LegalVoiceAssistant
+
+        return LegalVoiceAssistant(model_size=model_size)
+    except ImportError as exc:
+        st.warning(f"Chưa cài đủ thư viện Whisper: {exc}")
+        return None
+    except Exception as exc:
+        st.warning(f"Không thể tải Whisper `{model_size}`: {exc}")
+        return None
+
+
+@st.cache_resource(show_spinner="Đang tải bộ chuẩn hóa câu hỏi...")
+def load_voice_query_rewriter() -> Optional[Any]:
+    try:
+        from src.whisper.llm_rewriter import LocalQueryRewriter
+
+        return LocalQueryRewriter()
+    except Exception:
+        return None
+
+
 def build_rag_resource(
     config_path: str,
     csv_path: str,
@@ -353,14 +379,7 @@ def render_timing(
     cache_elapsed: Optional[float] = None,
     cache_label: Optional[str] = None,
 ) -> None:
-    parts = []
-    if llm_elapsed is not None:
-        parts.append(f"LLM: `{format_elapsed(llm_elapsed)}`")
-    if cache_elapsed is not None:
-        label = cache_label or "cache"
-        parts.append(f"{label}: `{format_elapsed(cache_elapsed)}`")
-    if parts:
-        st.caption(" | ".join(parts))
+    return
 
 
 def init_session() -> None:
@@ -440,6 +459,22 @@ def render_sources(title: str, sources: List[str]) -> None:
         for i, ctx in enumerate(sources, 1):
             st.markdown(f'<span class="source-badge">Nguồn {i}</span>', unsafe_allow_html=True)
             st.caption(ctx[:500] + "..." if len(ctx) > 500 else ctx)
+
+
+def transcribe_uploaded_audio(uploaded_audio: Any) -> tuple[str, str, Optional[str]]:
+    assistant = load_voice_assistant()
+    if assistant is None:
+        return "", "", "Whisper chưa sẵn sàng."
+
+    rewriter = load_voice_query_rewriter()
+    suffix = Path(uploaded_audio.name or "").suffix.lower() or ".mp3"
+    with tempfile.TemporaryDirectory(prefix="voice_question_") as temp_dir:
+        audio_path = Path(temp_dir) / f"uploaded{suffix}"
+        audio_path.write_bytes(uploaded_audio.getvalue())
+        try:
+            return assistant.transcribe_for_rag(str(audio_path), rewriter=rewriter)
+        except Exception as exc:
+            return "", "", f"Whisper không xử lý được file MP3: {exc}"
 
 
 def render_streamed_answer(
@@ -538,7 +573,7 @@ def process_query(query: str) -> None:
     default_llm_elapsed = None
     if not default_ready:
         default_answer = render_unavailable_answer(
-            "2. Qwen 2.5 + RAG cache_dir",
+            "2. Qwen 2.5 + RAG with vietnamese-sbert",
             "",
             "RAG `cache_dir` chưa sẵn sàng hoặc chưa load được dữ liệu.",
             detail=default_error,
@@ -547,7 +582,7 @@ def process_query(query: str) -> None:
         )
     else:
         default_answer, default_llm_elapsed = render_streamed_answer(
-            label="2. Qwen 2.5 + RAG cache_dir",
+            label="2. Qwen 2.5 + RAG with vietnamese-sbert",
             avatar="",
             query=query,
             contexts=default_contexts,
@@ -560,7 +595,7 @@ def process_query(query: str) -> None:
     answers.append(
         {
             "key": "rag_default",
-            "label": "2. Qwen 2.5 + RAG cache_dir",
+            "label": "2. Qwen 2.5 + RAG with vietnamese-sbert",
             "avatar": "",
             "content": default_answer,
             "sources": default_contexts,
@@ -580,7 +615,7 @@ def process_query(query: str) -> None:
     halong_llm_elapsed = None
     if not halong_ready:
         halong_answer = render_unavailable_answer(
-            "3. Qwen 2.5 + RAG cache_dir_halong",
+            "3. Qwen 2.5 + RAG with halong_embedding",
             "",
             "RAG `cache_dir_halong` chưa sẵn sàng hoặc chưa load được dữ liệu.",
             detail=halong_error,
@@ -589,7 +624,7 @@ def process_query(query: str) -> None:
         )
     else:
         halong_answer, halong_llm_elapsed = render_streamed_answer(
-            label="3. Qwen 2.5 + RAG cache_dir_halong",
+            label="3. Qwen 2.5 + RAG with halong_embedding",
             avatar="",
             query=query,
             contexts=halong_contexts,
@@ -602,7 +637,7 @@ def process_query(query: str) -> None:
     answers.append(
         {
             "key": "rag_halong",
-            "label": "3. Qwen 2.5 + RAG cache_dir_halong",
+            "label": "3. Qwen 2.5 + RAG with halong_embedding",
             "avatar": "",
             "content": halong_answer,
             "sources": halong_contexts,
@@ -651,8 +686,8 @@ def render_sidebar() -> None:
 
         st.caption(f"Model LLM đang dùng: `{model_name}`")
         render_model_card(1, "Không RAG", "Trả lời trực tiếp câu hỏi", ollama_ready)
-        render_model_card(2, "RAG cache_dir", f"Cache embedding: {get_encoder_name()}", ollama_ready and rag_default_ready)
-        render_model_card(3, "RAG cache_dir_halong", f"Cache embedding: {get_halong_encoder_name()}", ollama_ready and rag_halong_ready)
+        render_model_card(2, "RAG with vietnamese-sbert", f"Cache embedding: {get_encoder_name()}", ollama_ready and rag_default_ready)
+        render_model_card(3, "RAG with halong_embedding", f"Cache embedding: {get_halong_encoder_name()}", ollama_ready and rag_halong_ready)
 
         st.divider()
 
@@ -697,7 +732,7 @@ def render_saved_answer(answer: Dict[str, Any]) -> None:
 def render_chat() -> None:
     st.markdown('<p class="gradient-title">Trợ lý Pháp luật AI</p>', unsafe_allow_html=True)
     st.markdown(
-        '<p class="subtitle">Một LLM, ba chế độ trả lời: không RAG, RAG cache_dir, RAG cache_dir_halong.</p>',
+        '<p class="subtitle">Một LLM, ba chế độ trả lời: không RAG, RAG with vietnamese-sbert, RAG with halong_embedding.</p>',
         unsafe_allow_html=True,
     )
 
@@ -752,6 +787,30 @@ def render_chat() -> None:
 
 
 def render_input() -> None:
+    uploaded_audio = st.file_uploader(
+        "MP3 câu hỏi",
+        type=["mp3"],
+        accept_multiple_files=False,
+        key="voice_mp3_upload",
+    )
+    if uploaded_audio is not None:
+        st.audio(uploaded_audio, format="audio/mp3")
+        if st.button("Gửi MP3", type="primary", use_container_width=True):
+            with st.spinner("Đang chuyển MP3 thành câu hỏi..."):
+                raw_query, voice_query, warning = transcribe_uploaded_audio(uploaded_audio)
+
+            if raw_query and voice_query:
+                if warning:
+                    st.warning(warning)
+                if raw_query != voice_query:
+                    st.info(f"Whisper: {raw_query}\n\nCâu hỏi RAG: {voice_query}")
+                else:
+                    st.info(f"Câu hỏi RAG: {voice_query}")
+                process_query(voice_query)
+                st.rerun()
+            else:
+                st.error(warning or "Không thể tạo câu hỏi từ file MP3.")
+
     prompt = st.chat_input("Hỏi về pháp luật... (VD: Vượt đèn đỏ phạt bao nhiêu?)")
     if prompt:
         process_query(prompt)

@@ -1,107 +1,136 @@
-# 🚦 Trợ lý Pháp lý AI
+# Trợ lý Pháp luật AI
 
-Hệ thống hỏi đáp luật giao thông đường bộ Việt Nam, sử dụng **Gemini 2.5 Flash** và **Hybrid RAG** (BM25 + FAISS + CrossEncoder).
+Ứng dụng Streamlit hỏi đáp pháp luật Việt Nam, chạy LLM local qua Ollama và so sánh 3 chế độ trả lời trên cùng một câu hỏi:
 
----
+- Không RAG
+- RAG với `keepitreal/vietnamese-sbert`
+- RAG với `hiieu/halong_embedding`
 
-## 🚀 Chạy ứng dụng
+App cũng hỗ trợ upload MP3, Whisper STT và chuẩn hóa câu hỏi bằng Ollama trước khi đưa vào RAG.
 
-```bash
-# 1. Kích hoạt môi trường conda
-conda activate dl
-
-# 2. Chạy Streamlit app
-streamlit run app.py
+```mermaid
+flowchart LR
+    Raw[data/raw] --> Pre[src/data-pre]
+    Pre --> Chunks[data/processed/legal_chunks_2024_2026.csv]
+    Chunks --> CacheA[data/processed/rag_cache_2024_2026]
+    Chunks --> CacheB[data/processed/rag_cache_2024_2026_halong_embedding]
+    CacheA --> App[app.py / Streamlit]
+    CacheB --> App
+    Audio[MP3 upload] --> Whisper[src/whisper/audio_processor.py]
+    Whisper --> Rewrite[src/whisper/llm_rewriter.py]
+    Rewrite --> App
+    Eval[src/rag/sts_eval.py] --> Report[data/processed/sts_eval_report]
 ```
 
-Mở trình duyệt tại: **http://localhost:8501**
+## Tính năng
 
----
+- Chat tiếng Việt với cùng một LLM ở 3 chế độ trả lời.
+- Hybrid RAG gồm BM25, FAISS HNSW/IVF và CrossEncoder reranking.
+- Hiển thị nguồn tham chiếu từ các chunk pháp luật.
+- Nhận câu hỏi từ file MP3 qua Whisper STT.
+- Chuẩn hóa câu hỏi bằng một Ollama rewriter local.
+- Có notebook STS để so sánh chất lượng hai embedding RAG.
 
-## 📋 Yêu cầu
+## Cấu trúc chính
 
-### API Key
-Tạo file `.env` ở thư mục gốc:
+```text
+.
+├── app.py
+├── configs/
+│   └── rag/
+│       ├── chunking.yaml
+│       └── vector_db.yaml
+├── data/
+│   ├── raw/
+│   └── processed/
+├── notebooks/
+│   └── sts_eval_analysis.ipynb
+├── src/
+│   ├── data-pre/
+│   ├── rag/
+│   │   ├── chunking.py
+│   │   ├── embedding.py
+│   │   ├── llm.py
+│   │   ├── sts_eval.py
+│   │   └── vector_db.py
+│   ├── ui/
+│   │   └── gemini_client.py
+│   └── whisper/
+│       ├── audio_processor.py
+│       └── llm_rewriter.py
+├── tests/
+│   └── test_gemini_client.py
+└── requirements.txt
 ```
-api_key=YOUR_GEMINI_API_KEY
-```
 
-### Cài đặt thư viện
+## Cài đặt
+
 ```bash
 conda activate dl
 pip install -r requirements.txt
 ```
 
----
+Whisper cần `ffmpeg`. Trên conda có thể cài bằng:
 
-## 🏗️ Cấu trúc dự án
-
-```
-.
-├── app.py                          # Streamlit UI chính
-├── .env                            # Gemini API key
-├── requirements.txt
-├── .streamlit/
-│   └── config.toml                 # Dark theme config
-└── src/
-    ├── ui/
-    │   └── gemini_client.py        # Gemini 2.5 Flash wrapper
-    ├── rag/
-    │   ├── vector_db.py            # Hybrid RAG (BM25 + FAISS + CrossEncoder)
-    │   └── data_optimizer.py       # Data chunking
-    ├── whisper/
-    │   ├── audio_processor.py      # Whisper STT
-    │   ├── llm_rewriter.py         # LLM query correction (Ollama)
-    │   └── query_rewriter.py       # SymSpell spell checker
-    ├── ocr/
-    │   ├── ocr_module.py           # VietOCR
-    │   └── ocr_paddle.py           # PaddleOCR
-    └── data-pre/
-        ├── data_loader.py
-        └── data_visualization.py
+```bash
+conda install -n dl -c conda-forge ffmpeg
 ```
 
----
+Ứng dụng chính dùng Ollama local. Hãy cài Ollama và pull model được khai báo trong `configs/rag/vector_db.yaml`:
 
-## ✨ Tính năng
+```bash
+ollama pull qwen2.5:7b
+```
 
-| Tính năng | Mô tả |
-|-----------|-------|
-| 💬 Chat text | Hỏi đáp luật giao thông bằng tiếng Việt |
-| 🤖 Gemini 2.5 Flash | Trả lời streaming, multi-turn conversation |
-| 🔍 Hybrid RAG | Tìm context từ CSDL luật (BM25 + FAISS HNSW + CrossEncoder reranker) |
-| 📚 Nguồn tham chiếu | Hiển thị đoạn luật gốc được dùng để trả lời |
-| 🌙 Dark mode | Giao diện gradient, glassmorphism |
-| ❓ Câu hỏi gợi ý | Welcome screen với 4 câu hỏi mẫu |
-| 🗑️ Xóa lịch sử | Reset hội thoại |
+Nếu muốn dùng `src/ui/gemini_client.py` hoặc chạy test liên quan, tạo file `.env` ở thư mục gốc với:
 
----
+```env
+api_key=YOUR_GEMINI_API_KEY
+```
 
-## 🔍 Kích hoạt RAG (tùy chọn)
-
-RAG cần file dữ liệu luật. Nếu chưa có, hệ thống vẫn hoạt động với Gemini thuần.
+## Chạy ứng dụng
 
 ```bash
 conda activate dl
-
-# Bước 1: Chuẩn bị dữ liệu (cần có legal_corpus_chunks.csv)
-python src/data-pre/data_loader.py
-
-# Bước 2: Tối ưu chunks
-python src/rag/data_optimizer.py
-
-# Bước 3: Chạy app — RAG sẽ tự load
 streamlit run app.py
 ```
 
-Khi RAG active, sidebar hiển thị badge **🟢 RAG: Đang hoạt động**.
+Mở trình duyệt tại `http://localhost:8501`.
 
----
+## Tạo lại dữ liệu và cache RAG
 
-## 🛠️ Stack
+Nếu muốn tái tạo từ dữ liệu nguồn, chạy theo thứ tự sau:
 
-- **UI:** Streamlit 1.35+
-- **LLM:** Google Gemini 2.5 Flash (`google-genai` SDK v2)
-- **RAG:** FAISS HNSW + BM25Okapi + CrossEncoder (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`)
-- **Embeddings:** `keepitreal/vietnamese-sbert`
-- **Môi trường:** Conda (`dl` environment)
+```bash
+# Chunk hóa văn bản pháp luật
+python src/rag/chunking.py --config configs/rag/chunking.yaml
+
+# Build cache RAG mặc định: keepitreal/vietnamese-sbert
+python src/rag/vector_db.py --config configs/rag/vector_db.yaml
+
+# Build cache RAG với Halong embedding
+python src/rag/vector_db.py --config configs/rag/vector_db.yaml --cache-dir-key cache_dir_halong --encoder-key encoder_halong
+```
+
+Nếu cần build lại từ đầu, thêm `--rebuild-cache`. Có thể test truy xuất bằng `--query "..."`.
+
+## Đánh giá STS
+
+Repo có script và notebook để đánh giá semantic similarity giữa output tham chiếu và hai biến thể RAG:
+
+```bash
+python src/rag/sts_eval.py --input data/processed/legal_valid.json --output data/processed/legal_valid_sts_eval.json --csv-out data/processed/sts_eval_report/legal_valid_sts_eval.csv
+```
+
+Phân tích trực quan nằm trong `notebooks/sts_eval_analysis.ipynb`.
+
+## Kiểm thử
+
+```bash
+pytest tests/test_gemini_client.py -v
+```
+
+## Ghi chú
+
+- Repo hiện đã có sẵn nhiều artifact trong `data/processed/`, nên thường chỉ cần cài dependencies, đảm bảo Ollama đang chạy và mở `app.py`.
+- App mặc định so sánh hai cache RAG: `cache_dir` và `cache_dir_halong` theo cấu hình trong `configs/rag/vector_db.yaml`.
